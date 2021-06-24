@@ -13,6 +13,7 @@ const pendingSymbol = Symbol.for('pending');
 const consumedCallbackSymbol = Symbol.for('consumedCallback');
 const consumedSymbol = Symbol.for('consumed');
 const onConsumedSymbol = Symbol.for('onConsumed');
+const bindableMethods = ['consume', 'ack', 'nack', 'reject'];
 
 function Message(fields = {}, content, properties = {}, onConsumed) {
   if (!(this instanceof Message)) {
@@ -31,16 +32,15 @@ function Message(fields = {}, content, properties = {}, onConsumed) {
     this[ttlSymbol] = messageProperties.ttl = timestamp + parseInt(properties.expiration);
   }
 
-  Object.assign(this, {
-    fields: { ...fields,
-      consumerTag: undefined
-    },
-    content,
-    properties: messageProperties
-  });
+  this.fields = { ...fields,
+    consumerTag: undefined
+  };
+  this.content = content;
+  this.properties = messageProperties;
 
-  for (const fn of ['consume', 'ack', 'nack', 'reject']) {
-    this[fn] = this[fn].bind(this);
+  for (let i = 0; i < bindableMethods.length; i++) {
+    const fn = bindableMethods[i];
+    this[fn] = Message.prototype[fn].bind(this);
   }
 }
 
@@ -50,23 +50,23 @@ Object.defineProperty(Message.prototype, 'messageId', {
   }
 
 });
+
 Object.defineProperty(Message.prototype, 'ttl', {
   get() {
     return this[ttlSymbol];
   }
-
 });
+
 Object.defineProperty(Message.prototype, 'consumerTag', {
   get() {
     return this.fields.consumerTag;
   }
-
 });
+
 Object.defineProperty(Message.prototype, 'pending', {
   get() {
     return this[pendingSymbol];
   }
-
 });
 
 Message.prototype.consume = function ({
