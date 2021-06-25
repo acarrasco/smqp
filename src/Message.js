@@ -1,30 +1,27 @@
-import { generateId } from "./shared";
+import { generateId } from './shared';
 
 export { Message };
 
-const messageIdSymbol = Symbol.for("messageId");
-const ttlSymbol = Symbol.for("ttl");
-const pendingSymbol = Symbol.for("pending");
-const consumedCallbackSymbol = Symbol.for("consumedCallback");
-const consumedSymbol = Symbol.for("consumed");
-const onConsumedSymbol = Symbol.for("onConsumed");
+const privateAttributes = new WeakMap();
 
-const publicMethods = ["consume", "ack", "nack", "reject"];
+const publicMethods = ['consume', 'ack', 'nack', 'reject'];
 
 function Message(fields = {}, content, properties = {}, onConsumed) {
   if (!(this instanceof Message)) {
     return new Message(fields, content, properties, onConsumed);
   }
+  const internal = {};
+  privateAttributes.set(this, internal);
 
-  this[onConsumedSymbol] = onConsumed;
-  this[pendingSymbol] = false;
-  this[messageIdSymbol] = properties.messageId || `smq.mid-${generateId()}`;
+  internal.onConsumed = onConsumed;
+  internal.pending = false;
+  internal.messageId = properties.messageId || `smq.mid-${generateId()}`;
 
-  const messageProperties = { ...properties, messageId: this[messageIdSymbol] };
+  const messageProperties = { ...properties, messageId: internal.messageId };
   const timestamp = (messageProperties.timestamp =
     properties.timestamp || Date.now());
   if (properties.expiration) {
-    this[ttlSymbol] = messageProperties.ttl =
+    internal.ttl = messageProperties.ttl =
       timestamp + parseInt(properties.expiration);
   }
 
@@ -36,58 +33,61 @@ function Message(fields = {}, content, properties = {}, onConsumed) {
   });
 }
 
-Object.defineProperty(Message.prototype, "messageId", {
+Object.defineProperty(Message.prototype, 'messageId', {
   get() {
-    return this[messageIdSymbol];
+    return privateAttributes.get(this).messageId;
   },
 });
 
-Object.defineProperty(Message.prototype, "ttl", {
+Object.defineProperty(Message.prototype, 'ttl', {
   get() {
-    return this[ttlSymbol];
+    return privateAttributes.get(this).ttl;
   },
 });
 
-Object.defineProperty(Message.prototype, "consumerTag", {
+Object.defineProperty(Message.prototype, 'consumerTag', {
   get() {
     return this.fields.consumerTag;
   },
 });
 
-Object.defineProperty(Message.prototype, "pending", {
+Object.defineProperty(Message.prototype, 'pending', {
   get() {
-    return this[pendingSymbol];
+    return privateAttributes.get(this).pending;
   },
 });
 
-Message.prototype.consume = function ({ consumerTag } = {}, consumedCb) {
-  this[pendingSymbol] = true;
+Message.prototype.consume = function({ consumerTag } = {}, consumedCb) {
+  const internal = privateAttributes.get(this);
+  internal.pending = true;
   this.fields.consumerTag = consumerTag;
-  this[consumedCallbackSymbol] = consumedCb;
+  internal.consumedCallback = consumedCb;
 };
 
-Message.prototype.reset = function () {
-  this[pendingSymbol] = false;
+Message.prototype.reset = function() {
+  privateAttributes.get(this).pending = false;
 };
 
-Message.prototype.ack = function (allUpTo) {
-  if (!this[pendingSymbol]) return;
-  this[consumedSymbol]("ack", allUpTo);
+Message.prototype.ack = function(allUpTo) {
+  if (privateAttributes.get(this).pending) {
+    this.consumed('ack', allUpTo);
+  }
 };
 
-Message.prototype.nack = function (allUpTo, requeue = true) {
-  if (!this[pendingSymbol]) return;
-  this[consumedSymbol]("nack", allUpTo, requeue);
+Message.prototype.nack = function(allUpTo, requeue = true) {
+  if (!privateAttributes.get(this).pending) return;
+  this.consumed('nack', allUpTo, requeue);
 };
 
-Message.prototype.reject = function (requeue = true) {
+Message.prototype.reject = function(requeue = true) {
   this.nack(false, requeue);
 };
 
-Message.prototype[consumedSymbol] = function (operation, allUpTo, requeue) {
+Message.prototype.consumed = function(operation, allUpTo, requeue) {
+  const internal = privateAttributes.get(this);
   [
-    this[consumedCallbackSymbol],
-    this[onConsumedSymbol],
+    internal.consumedCallback,
+    internal.onConsumed,
     this.reset.bind(this),
   ].forEach((fn) => {
     if (fn) fn(this, operation, allUpTo, requeue);

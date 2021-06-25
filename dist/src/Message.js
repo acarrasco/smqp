@@ -7,29 +7,26 @@ exports.Message = Message;
 
 var _shared = require("./shared");
 
-const messageIdSymbol = Symbol.for('messageId');
-const ttlSymbol = Symbol.for('ttl');
-const pendingSymbol = Symbol.for('pending');
-const consumedCallbackSymbol = Symbol.for('consumedCallback');
-const consumedSymbol = Symbol.for('consumed');
-const onConsumedSymbol = Symbol.for('onConsumed');
-const bindableMethods = ['consume', 'ack', 'nack', 'reject'];
+const privateAttributes = new WeakMap();
+const publicMethods = ['consume', 'ack', 'nack', 'reject'];
 
 function Message(fields = {}, content, properties = {}, onConsumed) {
   if (!(this instanceof Message)) {
     return new Message(fields, content, properties, onConsumed);
   }
 
-  this[onConsumedSymbol] = onConsumed;
-  this[pendingSymbol] = false;
-  this[messageIdSymbol] = properties.messageId || `smq.mid-${(0, _shared.generateId)()}`;
+  const internal = {};
+  privateAttributes.set(this, internal);
+  internal.onConsumed = onConsumed;
+  internal.pending = false;
+  internal.messageId = properties.messageId || `smq.mid-${(0, _shared.generateId)()}`;
   const messageProperties = { ...properties,
-    messageId: this[messageIdSymbol]
+    messageId: internal.messageId
   };
   const timestamp = messageProperties.timestamp = properties.timestamp || Date.now();
 
   if (properties.expiration) {
-    this[ttlSymbol] = messageProperties.ttl = timestamp + parseInt(properties.expiration);
+    internal.ttl = messageProperties.ttl = timestamp + parseInt(properties.expiration);
   }
 
   this.fields = { ...fields,
@@ -37,66 +34,67 @@ function Message(fields = {}, content, properties = {}, onConsumed) {
   };
   this.content = content;
   this.properties = messageProperties;
-
-  for (let i = 0; i < bindableMethods.length; i++) {
-    const fn = bindableMethods[i];
+  publicMethods.forEach(fn => {
     this[fn] = Message.prototype[fn].bind(this);
-  }
+  });
 }
 
 Object.defineProperty(Message.prototype, 'messageId', {
   get() {
-    return this[messageIdSymbol];
+    return privateAttributes.get(this).messageId;
   }
 
 });
-
 Object.defineProperty(Message.prototype, 'ttl', {
   get() {
-    return this[ttlSymbol];
+    return privateAttributes.get(this).ttl;
   }
-});
 
+});
 Object.defineProperty(Message.prototype, 'consumerTag', {
   get() {
     return this.fields.consumerTag;
   }
-});
 
+});
 Object.defineProperty(Message.prototype, 'pending', {
   get() {
-    return this[pendingSymbol];
+    return privateAttributes.get(this).pending;
   }
+
 });
 
 Message.prototype.consume = function ({
   consumerTag
 } = {}, consumedCb) {
-  this[pendingSymbol] = true;
+  const internal = privateAttributes.get(this);
+  internal.pending = true;
   this.fields.consumerTag = consumerTag;
-  this[consumedCallbackSymbol] = consumedCb;
+  internal.consumedCallback = consumedCb;
 };
 
 Message.prototype.reset = function () {
-  this[pendingSymbol] = false;
+  privateAttributes.get(this).pending = false;
 };
 
 Message.prototype.ack = function (allUpTo) {
-  if (!this[pendingSymbol]) return;
-  this[consumedSymbol]('ack', allUpTo);
+  if (privateAttributes.get(this).pending) {
+    this.consumed('ack', allUpTo);
+  }
 };
 
 Message.prototype.nack = function (allUpTo, requeue = true) {
-  if (!this[pendingSymbol]) return;
-  this[consumedSymbol]('nack', allUpTo, requeue);
+  if (!privateAttributes.get(this).pending) return;
+  this.consumed('nack', allUpTo, requeue);
 };
 
 Message.prototype.reject = function (requeue = true) {
   this.nack(false, requeue);
 };
 
-Message.prototype[consumedSymbol] = function (operation, allUpTo, requeue) {
-  [this[consumedCallbackSymbol], this[onConsumedSymbol], this.reset.bind(this)].forEach(fn => {
+Message.prototype.consumed = function (operation, allUpTo, requeue) {
+  const internal = privateAttributes.get(this);
+  [internal.consumedCallback, internal.onConsumed, this.reset.bind(this)].forEach(fn => {
     if (fn) fn(this, operation, allUpTo, requeue);
   });
 };
