@@ -32,7 +32,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "mocha",
+    "test": "mocha -R dot --bail",
     "test:lcov": "nyc mocha && nyc report --reporter lcov && npm run posttest",
     "posttest": "npm run dist &&  eslint . --cache && npm run toc",
     "cov:html": "nyc mocha && nyc report --reporter=html",

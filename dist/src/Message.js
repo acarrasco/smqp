@@ -7,27 +7,22 @@ exports.Message = Message;
 
 var _shared = require("./shared");
 
-const privateAttributes = {
-  onConsumed: Symbol('onConsumed'),
-  pending: Symbol('pending'),
-  messageId: Symbol('messageId'),
-  ttl: Symbol('ttl'),
-  consumedCallback: Symbol('consumedCallback')
-};
+const prv = Symbol('private');
 const publicMethods = ['consume', 'ack', 'nack', 'reject'];
 
 class _Message {
   constructor(fields = {}, content, properties = {}, onConsumed) {
-    this[privateAttributes.onConsumed] = onConsumed;
-    this[privateAttributes.pending] = false;
-    this[privateAttributes.messageId] = properties.messageId || `smq.mid-${(0, _shared.generateId)()}`;
+    this[prv] = {};
+    this[prv].onConsumed = onConsumed;
+    this[prv].pending = false;
+    this[prv].messageId = properties.messageId || `smq.mid-${(0, _shared.generateId)()}`;
     const messageProperties = { ...properties,
-      messageId: this[privateAttributes.messageId]
+      messageId: this[prv].messageId
     };
     const timestamp = messageProperties.timestamp = properties.timestamp || Date.now();
 
     if (properties.expiration) {
-      this[privateAttributes.ttl] = messageProperties.ttl = timestamp + parseInt(properties.expiration);
+      this[prv].ttl = messageProperties.ttl = timestamp + parseInt(properties.expiration);
     }
 
     this.fields = { ...fields,
@@ -41,11 +36,11 @@ class _Message {
   }
 
   get messageId() {
-    return this[privateAttributes.messageId];
+    return this[prv].messageId;
   }
 
   get ttl() {
-    return this[privateAttributes.ttl];
+    return this[prv].ttl;
   }
 
   get consumerTag() {
@@ -53,38 +48,39 @@ class _Message {
   }
 
   get pending() {
-    return this[privateAttributes.pending];
+    return this[prv].pending;
   }
 
   consume({
     consumerTag
   } = {}, consumedCb) {
-    this[privateAttributes.pending] = true;
+    this[prv].pending = true;
     this.fields.consumerTag = consumerTag;
-    this[privateAttributes.consumedCallback] = consumedCb;
+    this[prv].consumedCallback = consumedCb;
   }
 
   reset() {
-    this[privateAttributes.pending] = false;
+    this[prv].pending = false;
   }
 
   ack(allUpTo) {
-    if (this[privateAttributes.pending]) {
-      this.consumed('ack', allUpTo);
+    if (this[prv].pending) {
+      this._consumed('ack', allUpTo);
     }
   }
 
   nack(allUpTo, requeue = true) {
-    if (!this[privateAttributes.pending]) return;
-    this.consumed('nack', allUpTo, requeue);
+    if (!this[prv].pending) return;
+
+    this._consumed('nack', allUpTo, requeue);
   }
 
   reject(requeue = true) {
     this.nack(false, requeue);
   }
 
-  consumed(operation, allUpTo, requeue) {
-    [this[privateAttributes.consumedCallback], this[privateAttributes.onConsumed], this.reset.bind(this)].forEach(fn => {
+  _consumed(operation, allUpTo, requeue) {
+    [this[prv].consumedCallback, this[prv].onConsumed, this.reset.bind(this)].forEach(fn => {
       if (fn) fn(this, operation, allUpTo, requeue);
     });
   }
