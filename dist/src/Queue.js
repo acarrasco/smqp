@@ -20,7 +20,7 @@ class _Queue {
       eventEmitter,
       consumers: [],
       pendingMessageCount: 0,
-      onMessageConsumed: _Queue.prototype.onMessageConsumed.bind(this)
+      onMessageConsumed: _Queue.prototype._onMessageConsumed.bind(this)
     };
     this.name = name || `smq.qname-${(0, _shared.generateId)()}`;
     this.options = {
@@ -79,7 +79,7 @@ class _Queue {
   }
 
   ackAll() {
-    this.getPendingMessages().forEach(msg => msg.ack(false));
+    this._getPendingMessages().forEach(msg => msg.ack(false));
   }
 
   assertConsumer(onMessage, consumeOptions = {}, owner) {
@@ -131,7 +131,7 @@ class _Queue {
           this.unbindConsumer(consumer);
         }
 
-        this.emit(eventName, ...args);
+        this._emit(eventName, ...args);
       },
       on: this.on
     };
@@ -139,8 +139,11 @@ class _Queue {
     consumers.push(consumer);
     consumers.sort(_shared.sortByPriority);
     this[prv].exclusivelyConsumed = consumer.options.exclusive;
-    this.emit('consume', consumer);
-    const pendingMessages = this.consumeMessages(consumer.capacity, consumer.options);
+
+    this._emit('consume', consumer);
+
+    const pendingMessages = this._consumeMessages(consumer.capacity, consumer.options);
+
     if (pendingMessages.length) consumer.push(pendingMessages);
     return consumer;
   }
@@ -159,7 +162,9 @@ class _Queue {
       consumer.cancel();
     });
     this.messages.splice(0);
-    this.emit('delete', this);
+
+    this._emit('delete', this);
+
     return {
       messageCount
     };
@@ -181,12 +186,13 @@ class _Queue {
     noAck,
     consumerTag
   } = {}) {
-    const message = this.consumeMessages(1, {
+    const message = this._consumeMessages(1, {
       noAck,
       consumerTag
     })[0];
+
     if (!message) return;
-    if (noAck) this.dequeue(message);
+    if (noAck) this._dequeue(message);
     return message;
   }
 
@@ -206,7 +212,7 @@ class _Queue {
   }
 
   nackAll(requeue = true) {
-    this.getPendingMessages().forEach(msg => msg.nack(false, requeue));
+    this._getPendingMessages().forEach(msg => msg.nack(false, requeue));
   }
 
   off(eventName, handler) {
@@ -239,8 +245,8 @@ class _Queue {
       pending
     }) => !pending);
     this[prv].pendingMessageCount = 0;
-    toDelete.forEach(message => this.dequeue(message));
-    if (!this.messages.length) this.emit('depleted', this);
+    toDelete.forEach(message => this._dequeue(message));
+    if (!this.messages.length) this._emit('depleted', this);
     return toDelete.length;
   }
 
@@ -272,12 +278,15 @@ class _Queue {
         discarded = evictOld();
 
       case 1:
-        this.emit('saturated');
+        this._emit('saturated');
+
     }
 
     if (onMessageQueued) onMessageQueued(message);
-    this.emit('message', message);
-    return discarded ? 0 : this.consumeNext();
+
+    this._emit('message', message);
+
+    return discarded ? 0 : this._consumeNext();
   }
 
   recover(state) {
@@ -286,7 +295,7 @@ class _Queue {
 
     if (!state) {
       consumers.slice().forEach(c => c.recover());
-      return this.consumeNext();
+      return this._consumeNext();
     }
 
     this.name = state.name;
@@ -314,7 +323,7 @@ class _Queue {
     consumers.forEach(c => c.recover());
 
     if (continueConsume) {
-      this.consumeNext();
+      this._consumeNext();
     }
 
     return this;
@@ -349,14 +358,14 @@ class _Queue {
   /* private methods */
 
 
-  dequeue(message) {
+  _dequeue(message) {
     const msgIdx = this.messages.indexOf(message);
     if (msgIdx === -1) return;
     this.messages.splice(msgIdx, 1);
     return true;
   }
 
-  consumeNext() {
+  _consumeNext() {
     const consumers = this[prv].consumers;
     if (this[prv].stopped) return;
     if (!this[prv].pendingMessageCount) return;
@@ -366,7 +375,8 @@ class _Queue {
     let consumed = 0;
 
     for (const consumer of readyConsumers) {
-      const msgs = this.consumeMessages(consumer.capacity, consumer.options);
+      const msgs = this._consumeMessages(consumer.capacity, consumer.options);
+
       if (!msgs.length) return consumed;
       consumer.push(msgs);
       consumed += msgs.length;
@@ -375,7 +385,7 @@ class _Queue {
     return consumed;
   }
 
-  consumeMessages(n, consumeOptions) {
+  _consumeMessages(n, consumeOptions) {
     if (this[prv].stopped || !this[prv].pendingMessageCount || !n) return [];
     const now = Date.now();
     const msgs = [];
@@ -400,9 +410,11 @@ class _Queue {
     return msgs;
   }
 
-  onMessageConsumed(message, operation, allUpTo, requeue) {
+  _onMessageConsumed(message, operation, allUpTo, requeue) {
     if (this[prv].stopped) return;
-    const pending = allUpTo && this.getPendingMessages(message);
+
+    const pending = allUpTo && this._getPendingMessages(message);
+
     const {
       properties
     } = message;
@@ -411,29 +423,30 @@ class _Queue {
     switch (operation) {
       case 'ack':
         {
-          if (!this.dequeue(message)) return;
+          if (!this._dequeue(message)) return;
           break;
         }
 
       case 'nack':
         if (requeue) {
-          this.requeueMessage(message);
+          this._requeueMessage(message);
+
           break;
         }
 
-        if (!this.dequeue(message)) return;
+        if (!this._dequeue(message)) return;
         deadLetter = !!this.options.deadLetterExchange;
         break;
     }
 
     let capacity;
-    if (!this.messages.length) this.emit('depleted', this);else if ((capacity = this.getCapacity()) === 1) {
-      this.emit('ready', capacity);
+    if (!this.messages.length) this._emit('depleted', this);else if ((capacity = this.getCapacity()) === 1) {
+      this._emit('ready', capacity);
     }
-    if (!pending || !pending.length) this.consumeNext();
+    if (!pending || !pending.length) this._consumeNext();
 
     if (!requeue && properties.confirm) {
-      this.emit('message.consumed.' + operation, {
+      this._emit('message.consumed.' + operation, {
         operation,
         message: { ...message
         }
@@ -449,7 +462,7 @@ class _Queue {
         deadMessage.fields.routingKey = this.options.deadLetterRoutingKey;
       }
 
-      this.emit('dead-letter', {
+      this._emit('dead-letter', {
         deadLetterExchange: this.options.deadLetterExchange,
         message: deadMessage
       });
@@ -460,14 +473,14 @@ class _Queue {
     }
   }
 
-  getPendingMessages(fromAndNotIncluding) {
+  _getPendingMessages(fromAndNotIncluding) {
     if (!fromAndNotIncluding) return this.messages.filter(msg => msg.pending);
     const msgIdx = this.messages.indexOf(fromAndNotIncluding);
     if (msgIdx === -1) return [];
     return this.messages.slice(0, msgIdx).filter(msg => msg.pending);
   }
 
-  requeueMessage(message) {
+  _requeueMessage(message) {
     const msgIdx = this.messages.indexOf(message);
     if (msgIdx === -1) return;
     this[prv].pendingMessageCount++;
@@ -476,7 +489,7 @@ class _Queue {
     }, message.content, message.properties, this[prv].onMessageConsumed));
   }
 
-  emit(eventName, content) {
+  _emit(eventName, content) {
     if (!this[prv].eventEmitter || !this[prv].eventEmitter.emit) return;
     const routingKey = `queue.${eventName}`;
     this[prv].eventEmitter.emit(routingKey, content);
