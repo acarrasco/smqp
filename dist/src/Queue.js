@@ -11,7 +11,7 @@ var _shared = require("./shared");
 var _Message = require("./Message");
 
 const prv = Symbol('private');
-const publicMethods = ['ack', 'ackAll', 'assertConsumer', 'cancel', 'close', 'consume', 'delete', 'dequeueMessage', 'dismiss', 'get', 'getState', 'nack', 'nackAll', 'off', 'on', 'peek', 'purge', 'queueMessage', 'recover', 'reject', 'stop', 'unbindConsumer' //'messageCount',
+const queuePublicMethods = ['ack', 'ackAll', 'assertConsumer', 'cancel', 'close', 'consume', 'delete', 'dequeueMessage', 'dismiss', 'get', 'getState', 'nack', 'nackAll', 'off', 'on', 'peek', 'purge', 'queueMessage', 'recover', 'reject', 'stop', 'unbindConsumer' //'messageCount',
 ];
 
 class _Queue {
@@ -33,7 +33,7 @@ class _Queue {
     }
 
     this.messages = [];
-    publicMethods.forEach(fn => {
+    queuePublicMethods.forEach(fn => {
       this[fn] = _Queue.prototype[fn].bind(this);
     });
   }
@@ -501,159 +501,172 @@ function Queue(name, options = {}, eventEmitter) {
   return new _Queue(name, options, eventEmitter);
 }
 
-function Consumer(queue, onMessage, options = {}, owner, eventEmitter) {
-  if (typeof onMessage !== 'function') {
-    throw new Error('message callback is required and must be a function');
+const consumerPublicMethods = ['on', 'ackAll', 'cancel', 'nackAll', 'prefetch', 'push', 'recover', 'stop'];
+
+class _Consumer {
+  constructor(queue, onMessage, options = {}, owner, eventEmitter) {
+    this.options = {
+      prefetch: 1,
+      priority: 0,
+      noAck: false,
+      ...options
+    };
+
+    if (!this.options.consumerTag) {
+      this.options.consumerTag = `smq.ctag-${(0, _shared.generateId)()}`;
+    }
+
+    const internalQueue = Queue(`${this.options.consumerTag}-q`, {
+      maxLength: this.options.prefetch
+    }, {
+      emit: _Consumer.prototype._onInternalQueueEvent.bind(this)
+    });
+    this[prv] = {
+      eventEmitter,
+      owner,
+      internalQueue,
+      ready: true,
+      stopped: false,
+      consuming: undefined,
+      onInternalMessageQueued: _Consumer.prototype._onInternalMessageQueued.bind(this)
+    };
+    this.queue = queue;
+    this.onMessage = onMessage;
+    consumerPublicMethods.forEach(fn => {
+      this[fn] = _Consumer.prototype[fn].bind(this);
+    });
   }
 
-  options = {
-    prefetch: 1,
-    priority: 0,
-    noAck: false,
-    ...options
-  };
-  if (!options.consumerTag) options.consumerTag = `smq.ctag-${(0, _shared.generateId)()}`;
-  let ready = true,
-      stopped = false,
-      consuming;
-  const internalQueue = Queue(`${options.consumerTag}-q`, {
-    maxLength: options.prefetch
-  }, {
-    emit: onInternalQueueEvent
-  });
-  const consumer = {
-    queue,
+  get consumerTag() {
+    return this.options.consumerTag;
+  }
 
-    get consumerTag() {
-      return options.consumerTag;
-    },
+  get messageCount() {
+    return this[prv].internalQueue.messageCount;
+  }
 
-    get messageCount() {
-      return internalQueue.messageCount;
-    },
+  get capacity() {
+    return this[prv].internalQueue.capacity;
+  }
 
-    get capacity() {
-      return internalQueue.capacity;
-    },
+  get queueName() {
+    return this.queue.name;
+  }
 
-    get queueName() {
-      return queue.name;
-    },
+  get ready() {
+    return this[prv].ready && !this[prv].stopped;
+  }
 
-    get ready() {
-      return ready && !stopped;
-    },
+  get stopped() {
+    return this[prv].stopped;
+  }
 
-    get stopped() {
-      return stopped;
-    },
+  on(eventName, handler) {
+    const pattern = `consumer.${eventName}`;
+    return this[prv].eventEmitter.on(pattern, handler);
+  }
 
-    options,
-    on,
-    onMessage,
-    ackAll,
-    cancel,
-    nackAll,
-    prefetch,
-    push,
-    recover,
-    stop
-  };
-  return consumer;
+  ackAll() {
+    this[prv].internalQueue.messages.slice().forEach(msg => {
+      msg.content.ack(false);
+    });
+  }
 
-  function push(messages) {
+  cancel(requeue = true) {
+    this._emit('cancel', this);
+
+    this.nackAll(requeue);
+  }
+
+  nackAll(requeue) {
+    this[prv].internalQueue.messages.slice().forEach(msg => {
+      msg.content.nack(false, requeue);
+    });
+  }
+
+  prefetch(value) {
+    this.options.prefetch = this[prv].internalQueue.maxLength = value;
+  }
+
+  push(messages) {
+    const {
+      internalQueue,
+      onInternalMessageQueued
+    } = this[prv];
     messages.forEach(message => {
       internalQueue.queueMessage(message.fields, message, message.properties, onInternalMessageQueued);
     });
 
-    if (!consuming) {
-      consume();
+    if (!this[prv].consuming) {
+      this._consume();
     }
   }
 
-  function onInternalMessageQueued(msg) {
-    const message = msg.content;
-    message.consume(options, onConsumed);
-
-    function onConsumed() {
-      internalQueue.dequeueMessage(msg);
-    }
+  recover() {
+    this[prv].stopped = false;
   }
 
-  function consume() {
-    if (stopped) return;
-    consuming = true;
-    const msg = internalQueue.get();
+  stop() {
+    this[prv].stopped = true;
+  }
+  /* private methods */
+
+
+  _emit(eventName, content) {
+    const routingKey = `consumer.${eventName}`;
+    this[prv].eventEmitter.emit(routingKey, content);
+  }
+
+  _consume() {
+    if (this[prv].stopped) return;
+    this[prv].consuming = true;
+    const msg = this[prv].internalQueue.get();
 
     if (!msg) {
-      consuming = false;
+      this[prv].consuming = false;
       return;
     }
 
-    msg.consume(options);
+    msg.consume(this.options);
     const message = msg.content;
-    message.consume(options, onConsumed);
-    if (options.noAck) msg.content.ack();
-    onMessage(msg.fields.routingKey, msg.content, owner);
-    consuming = false;
-    return consume();
+    message.consume(this.options, onConsumed);
+    if (this.options.noAck) msg.content.ack();
+    this.onMessage(msg.fields.routingKey, msg.content, this[prv].owner);
+    this[prv].consuming = false;
+    return this._consume();
 
     function onConsumed() {
       msg.nack(false, false);
     }
   }
 
-  function onInternalQueueEvent(eventName) {
+  _onInternalMessageQueued(msg) {
+    const message = msg.content;
+    const internalQueue = this[prv].internalQueue;
+    message.consume(this.options, () => internalQueue.dequeueMessage(msg));
+  }
+
+  _onInternalQueueEvent(eventName) {
     switch (eventName) {
       case 'queue.saturated':
         {
-          ready = false;
+          this[prv].ready = false;
           break;
         }
 
       case 'queue.depleted':
       case 'queue.ready':
-        ready = true;
+        this[prv].ready = true;
         break;
     }
   }
 
-  function nackAll(requeue) {
-    internalQueue.messages.slice().forEach(msg => {
-      msg.content.nack(false, requeue);
-    });
+}
+
+function Consumer(queue, onMessage, options = {}, owner, eventEmitter) {
+  if (typeof onMessage !== 'function') {
+    throw new Error('message callback is required and must be a function');
   }
 
-  function ackAll() {
-    internalQueue.messages.slice().forEach(msg => {
-      msg.content.ack(false);
-    });
-  }
-
-  function cancel(requeue = true) {
-    emit('cancel', consumer);
-    nackAll(requeue);
-  }
-
-  function prefetch(value) {
-    options.prefetch = internalQueue.maxLength = value;
-  }
-
-  function emit(eventName, content) {
-    const routingKey = `consumer.${eventName}`;
-    eventEmitter.emit(routingKey, content);
-  }
-
-  function on(eventName, handler) {
-    const pattern = `consumer.${eventName}`;
-    return eventEmitter.on(pattern, handler);
-  }
-
-  function recover() {
-    stopped = false;
-  }
-
-  function stop() {
-    stopped = true;
-  }
+  return new _Consumer(queue, onMessage, options, owner, eventEmitter);
 }
