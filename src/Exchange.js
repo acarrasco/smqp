@@ -19,7 +19,7 @@ function EventExchange(name) {
 
 const prv = Symbol('private');
 
-const publicMethods = [
+const exchangePublicMethods = [
   'bind',
   'close',
   'emit',
@@ -63,7 +63,7 @@ class ExchangeBase {
     this.type = type;
     this.options = { durable: true, autoDelete: true, ...options };
 
-    publicMethods.forEach((fn) => {
+    exchangePublicMethods.forEach((fn) => {
       this[fn] = ExchangeBase.prototype[fn].bind(this);
     });
   }
@@ -179,7 +179,7 @@ class ExchangeBase {
     );
     if (bound) return bound;
 
-    const binding = this.Binding(queue, pattern, bindOptions, this); // XXX refactor Binding
+    const binding = new Binding(queue, pattern, bindOptions, this);
     this[prv].bindings.push(binding);
     this[prv].bindings.sort(sortByPriority);
 
@@ -308,45 +308,56 @@ class ExchangeBase {
       }
     }
   }
+  _onInternalQueueEmit() { }
+}
 
-  Binding(queue, pattern, bindOptions = {}, exchange) {
-    const rPattern = getRoutingKeyPattern(pattern);
-    queue.on('delete', closeBinding);
+const bindingPublicMethods = [
+  'close',
+  'testPattern',
+  'getState',
+];
+class Binding {
+  constructor(queue, pattern, bindOptions = {}, exchange) {
 
-    const binding = {
-      id: `${queue.name}/${pattern}`,
-      options: { priority: 0, ...bindOptions },
-      pattern,
-      get queue() {
-        return queue;
-      },
-      get queueName() {
-        return queue.name;
-      },
-      close: closeBinding,
-      testPattern,
-      getState: getBindingState,
+    this[prv] = {
+      rPattern: getRoutingKeyPattern(pattern),
+      exchange,
+      queue
     };
 
-    return binding;
+    this.id = `${queue.name}/${pattern}`;
+    this.options = { priority: 0, ...bindOptions };
+    this.pattern = pattern;
 
-    function testPattern(routingKey) {
-      return rPattern.test(routingKey);
-    }
+    bindingPublicMethods.forEach((fn) => {
+      this[fn] = Binding.prototype[fn].bind(this);
+    });
 
-    function closeBinding() {
-      exchange.unbind(queue, pattern);
-    }
-
-    function getBindingState() {
-      return {
-        id: binding.id,
-        options: { ...binding.options },
-        queueName: binding.queueName,
-        pattern,
-      };
-    }
+    queue.on('delete', this.close);
   }
 
-  _onInternalQueueEmit() {}
+  get queue() {
+    return this[prv].queue;
+  }
+
+  get queueName() {
+    return this[prv].queue.name;
+  }
+
+  testPattern(routingKey) {
+    return this[prv].rPattern.test(routingKey);
+  }
+
+  close() {
+    this[prv].exchange.unbind(this[prv].queue, this.pattern);
+  }
+
+  getState() {
+    return {
+      id: this.id,
+      options: { ...this.options },
+      queueName: this.queueName,
+      pattern: this.pattern,
+    };
+  }
 }
