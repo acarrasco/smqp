@@ -70,186 +70,6 @@ class _Queue {
     return this.getCapacity();
   }
 
-  getCapacity() {
-    return this.options.maxLength - this.messages.length;
-  }
-
-  ack(message, allUpTo) {
-    this[prv].onMessageConsumed(message, 'ack', allUpTo);
-  }
-
-  ackAll() {
-    this._getPendingMessages().forEach(msg => msg.ack(false));
-  }
-
-  assertConsumer(onMessage, consumeOptions = {}, owner) {
-    const consumers = this[prv].consumers;
-
-    if (!consumers.length) {
-      return this.consume(onMessage, consumeOptions, owner);
-    }
-
-    for (const consumer of consumers) {
-      if (consumer.onMessage !== onMessage) continue;
-
-      if (consumeOptions.consumerTag && consumeOptions.consumerTag !== consumer.consumerTag) {
-        continue;
-      } else if ('exclusive' in consumeOptions && consumeOptions.exclusive !== consumer.options.exclusive) {
-        continue;
-      }
-
-      return consumer;
-    }
-
-    return this.consume(onMessage, consumeOptions, owner);
-  }
-
-  cancel(consumerTag) {
-    const consumers = this[prv].consumers;
-    const idx = consumers.findIndex(c => c.consumerTag === consumerTag);
-    if (idx === -1) return;
-    return this.unbindConsumer(consumers[idx]);
-  }
-
-  close() {
-    this[prv].consumers.splice(0).forEach(consumer => consumer.cancel());
-    this[prv].exclusivelyConsumed = false;
-  }
-
-  consume(onMessage, consumeOptions = {}, owner) {
-    const consumers = this[prv].consumers;
-
-    if (this[prv].exclusivelyConsumed && consumers.length) {
-      throw new Error(`Queue ${this.name} is exclusively consumed by ${consumers[0].consumerTag}`);
-    } else if (consumeOptions.exclusive && consumers.length) {
-      throw new Error(`Queue ${this.name} already has consumers and cannot be exclusively consumed`);
-    }
-
-    const consumerEmitter = {
-      emit: (eventName, ...args) => {
-        if (eventName === 'consumer.cancel') {
-          this.unbindConsumer(consumer);
-        }
-
-        this._emit(eventName, ...args);
-      },
-      on: this.on
-    };
-    const consumer = Consumer(this, onMessage, consumeOptions, owner, consumerEmitter);
-    consumers.push(consumer);
-    consumers.sort(_shared.sortByPriority);
-    this[prv].exclusivelyConsumed = consumer.options.exclusive;
-
-    this._emit('consume', consumer);
-
-    const pendingMessages = this._consumeMessages(consumer.capacity, consumer.options);
-
-    if (pendingMessages.length) consumer.push(pendingMessages);
-    return consumer;
-  }
-
-  delete({
-    ifUnused,
-    ifEmpty
-  } = {}) {
-    const consumers = this[prv].consumers;
-    if (ifUnused && consumers.length) return;
-    if (ifEmpty && this.messages.length) return;
-    const messageCount = this.messages.length;
-    this.stop();
-    const deleteConsumers = consumers.splice(0);
-    deleteConsumers.forEach(consumer => {
-      consumer.cancel();
-    });
-    this.messages.splice(0);
-
-    this._emit('delete', this);
-
-    return {
-      messageCount
-    };
-  }
-
-  dequeueMessage(message) {
-    if (message.pending) return this.nack(message, false, false);
-    message.consume({});
-    this.nack(message, false, false);
-  }
-
-  dismiss(onMessage) {
-    const consumer = this[prv].consumers.find(c => c.onMessage === onMessage);
-    if (!consumer) return;
-    this.unbindConsumer(consumer);
-  }
-
-  get({
-    noAck,
-    consumerTag
-  } = {}) {
-    const message = this._consumeMessages(1, {
-      noAck,
-      consumerTag
-    })[0];
-
-    if (!message) return;
-    if (noAck) this._dequeue(message);
-    return message;
-  }
-
-  getState() {
-    return {
-      name: this.name,
-      options: { ...this.options
-      },
-      ...(this.messages.length ? {
-        messages: JSON.parse(JSON.stringify(this.messages))
-      } : undefined)
-    };
-  }
-
-  nack(message, allUpTo, requeue = true) {
-    this[prv].onMessageConsumed(message, 'nack', allUpTo, requeue);
-  }
-
-  nackAll(requeue = true) {
-    this._getPendingMessages().forEach(msg => msg.nack(false, requeue));
-  }
-
-  off(eventName, handler) {
-    if (!this[prv].eventEmitter || !this[prv].eventEmitter.off) return;
-    const pattern = `queue.${eventName}`;
-    return this[prv].eventEmitter.off(pattern, handler);
-  }
-
-  on(eventName, handler) {
-    if (!this[prv].eventEmitter || !this[prv].eventEmitter.on) return;
-    const pattern = `queue.${eventName}`;
-    return this[prv].eventEmitter.on(pattern, handler);
-  }
-
-  peek(ignoreDelivered) {
-    const message = this.messages[0];
-    if (!message) return;
-    if (!ignoreDelivered) return message;
-    if (!message.pending) return message;
-
-    for (let idx = 1; idx < this.messages.length; idx++) {
-      if (!this.messages[idx].pending) {
-        return this.messages[idx];
-      }
-    }
-  }
-
-  purge() {
-    const toDelete = this.messages.filter(({
-      pending
-    }) => !pending);
-    this[prv].pendingMessageCount = 0;
-    toDelete.forEach(message => this._dequeue(message));
-    if (!this.messages.length) this._emit('depleted', this);
-    return toDelete.length;
-  }
-
   queueMessage(fields, content, properties, onMessageQueued) {
     if (this[prv].stopped) return;
     const messageProperties = { ...properties
@@ -289,82 +109,6 @@ class _Queue {
     return discarded ? 0 : this._consumeNext();
   }
 
-  recover(state) {
-    this[prv].stopped = false;
-    const consumers = this[prv].consumers;
-
-    if (!state) {
-      consumers.slice().forEach(c => c.recover());
-      return this._consumeNext();
-    }
-
-    this.name = state.name;
-    this.messages.splice(0);
-    let continueConsume;
-
-    if (consumers.length) {
-      consumers.forEach(c => c.nackAll(false));
-      continueConsume = true;
-    }
-
-    if (!state.messages) return this;
-    state.messages.forEach(({
-      fields,
-      content,
-      properties
-    }) => {
-      if (properties.persistent === false) return;
-      const msg = (0, _Message.Message)({ ...fields,
-        redelivered: true
-      }, content, properties, this[prv].onMessageConsumed);
-      this.messages.push(msg);
-    });
-    this[prv].pendingMessageCount = this.messages.length;
-    consumers.forEach(c => c.recover());
-
-    if (continueConsume) {
-      this._consumeNext();
-    }
-
-    return this;
-  }
-
-  reject(message, requeue = true) {
-    this[prv].onMessageConsumed(message, 'nack', false, requeue);
-  }
-
-  stop() {
-    this[prv].stopped = true;
-    this.consumers.forEach(consumer => consumer.stop());
-  }
-
-  unbindConsumer(consumer) {
-    const idx = this[prv].consumers.indexOf(consumer);
-    if (idx === -1) return;
-    this[prv].consumers.splice(idx, 1);
-
-    if (this[prv].exclusivelyConsumed) {
-      this[prv].exclusivelyConsumed = false;
-    }
-
-    consumer.stop();
-
-    if (this.options.autoDelete && !this[prv].consumers.length) {
-      return this.delete();
-    }
-
-    consumer.nackAll(true);
-  }
-  /* private methods */
-
-
-  _dequeue(message) {
-    const msgIdx = this.messages.indexOf(message);
-    if (msgIdx === -1) return;
-    this.messages.splice(msgIdx, 1);
-    return true;
-  }
-
   _consumeNext() {
     const consumers = this[prv].consumers;
     if (this[prv].stopped) return;
@@ -383,6 +127,74 @@ class _Queue {
     }
 
     return consumed;
+  }
+
+  consume(onMessage, consumeOptions = {}, owner) {
+    const consumers = this[prv].consumers;
+
+    if (this[prv].exclusivelyConsumed && consumers.length) {
+      throw new Error(`Queue ${this.name} is exclusively consumed by ${consumers[0].consumerTag}`);
+    } else if (consumeOptions.exclusive && consumers.length) {
+      throw new Error(`Queue ${this.name} already has consumers and cannot be exclusively consumed`);
+    }
+
+    const consumerEmitter = {
+      emit: (eventName, ...args) => {
+        if (eventName === 'consumer.cancel') {
+          this.unbindConsumer(consumer);
+        }
+
+        this._emit(eventName, ...args);
+      },
+      on: this.on
+    };
+    const consumer = Consumer(this, onMessage, consumeOptions, owner, consumerEmitter);
+    consumers.push(consumer);
+    consumers.sort(_shared.sortByPriority);
+    this[prv].exclusivelyConsumed = consumer.options.exclusive;
+
+    this._emit('consume', consumer);
+
+    const pendingMessages = this._consumeMessages(consumer.capacity, consumer.options);
+
+    if (pendingMessages.length) consumer.push(pendingMessages);
+    return consumer;
+  }
+
+  assertConsumer(onMessage, consumeOptions = {}, owner) {
+    const consumers = this[prv].consumers;
+
+    if (!consumers.length) {
+      return this.consume(onMessage, consumeOptions, owner);
+    }
+
+    for (const consumer of consumers) {
+      if (consumer.onMessage !== onMessage) continue;
+
+      if (consumeOptions.consumerTag && consumeOptions.consumerTag !== consumer.consumerTag) {
+        continue;
+      } else if ('exclusive' in consumeOptions && consumeOptions.exclusive !== consumer.options.exclusive) {
+        continue;
+      }
+
+      return consumer;
+    }
+
+    return this.consume(onMessage, consumeOptions, owner);
+  }
+
+  get({
+    noAck,
+    consumerTag
+  } = {}) {
+    const message = this._consumeMessages(1, {
+      noAck,
+      consumerTag
+    })[0];
+
+    if (!message) return;
+    if (noAck) this._dequeue(message);
+    return message;
   }
 
   _consumeMessages(n, consumeOptions) {
@@ -408,6 +220,18 @@ class _Queue {
     for (const expired of evict) this.nack(expired, false, false);
 
     return msgs;
+  }
+
+  ack(message, allUpTo) {
+    this[prv].onMessageConsumed(message, 'ack', allUpTo);
+  }
+
+  nack(message, allUpTo, requeue = true) {
+    this[prv].onMessageConsumed(message, 'nack', allUpTo, requeue);
+  }
+
+  reject(message, requeue = true) {
+    this[prv].onMessageConsumed(message, 'nack', false, requeue);
   }
 
   _onMessageConsumed(message, operation, allUpTo, requeue) {
@@ -473,6 +297,14 @@ class _Queue {
     }
   }
 
+  ackAll() {
+    this._getPendingMessages().forEach(msg => msg.ack(false));
+  }
+
+  nackAll(requeue = true) {
+    this._getPendingMessages().forEach(msg => msg.nack(false, requeue));
+  }
+
   _getPendingMessages(fromAndNotIncluding) {
     if (!fromAndNotIncluding) return this.messages.filter(msg => msg.pending);
     const msgIdx = this.messages.indexOf(fromAndNotIncluding);
@@ -489,10 +321,176 @@ class _Queue {
     }, message.content, message.properties, this[prv].onMessageConsumed));
   }
 
+  peek(ignoreDelivered) {
+    const message = this.messages[0];
+    if (!message) return;
+    if (!ignoreDelivered) return message;
+    if (!message.pending) return message;
+
+    for (let idx = 1; idx < this.messages.length; idx++) {
+      if (!this.messages[idx].pending) {
+        return this.messages[idx];
+      }
+    }
+  }
+
+  cancel(consumerTag) {
+    const consumers = this[prv].consumers;
+    const idx = consumers.findIndex(c => c.consumerTag === consumerTag);
+    if (idx === -1) return;
+    return this.unbindConsumer(consumers[idx]);
+  }
+
+  dismiss(onMessage) {
+    const consumer = this[prv].consumers.find(c => c.onMessage === onMessage);
+    if (!consumer) return;
+    this.unbindConsumer(consumer);
+  }
+
+  unbindConsumer(consumer) {
+    const idx = this[prv].consumers.indexOf(consumer);
+    if (idx === -1) return;
+    this[prv].consumers.splice(idx, 1);
+
+    if (this[prv].exclusivelyConsumed) {
+      this[prv].exclusivelyConsumed = false;
+    }
+
+    consumer.stop();
+
+    if (this.options.autoDelete && !this[prv].consumers.length) {
+      return this.delete();
+    }
+
+    consumer.nackAll(true);
+  }
+
   _emit(eventName, content) {
     if (!this[prv].eventEmitter || !this[prv].eventEmitter.emit) return;
     const routingKey = `queue.${eventName}`;
     this[prv].eventEmitter.emit(routingKey, content);
+  }
+
+  on(eventName, handler) {
+    if (!this[prv].eventEmitter || !this[prv].eventEmitter.on) return;
+    const pattern = `queue.${eventName}`;
+    return this[prv].eventEmitter.on(pattern, handler);
+  }
+
+  off(eventName, handler) {
+    if (!this[prv].eventEmitter || !this[prv].eventEmitter.off) return;
+    const pattern = `queue.${eventName}`;
+    return this[prv].eventEmitter.off(pattern, handler);
+  }
+
+  purge() {
+    const toDelete = this.messages.filter(({
+      pending
+    }) => !pending);
+    this[prv].pendingMessageCount = 0;
+    toDelete.forEach(message => this._dequeue(message));
+    if (!this.messages.length) this._emit('depleted', this);
+    return toDelete.length;
+  }
+
+  dequeueMessage(message) {
+    if (message.pending) return this.nack(message, false, false);
+    message.consume({});
+    this.nack(message, false, false);
+  }
+
+  _dequeue(message) {
+    const msgIdx = this.messages.indexOf(message);
+    if (msgIdx === -1) return;
+    this.messages.splice(msgIdx, 1);
+    return true;
+  }
+
+  getState() {
+    return {
+      name: this.name,
+      options: { ...this.options
+      },
+      ...(this.messages.length ? {
+        messages: JSON.parse(JSON.stringify(this.messages))
+      } : undefined)
+    };
+  }
+
+  recover(state) {
+    this[prv].stopped = false;
+    const consumers = this[prv].consumers;
+
+    if (!state) {
+      consumers.slice().forEach(c => c.recover());
+      return this._consumeNext();
+    }
+
+    this.name = state.name;
+    this.messages.splice(0);
+    let continueConsume;
+
+    if (consumers.length) {
+      consumers.forEach(c => c.nackAll(false));
+      continueConsume = true;
+    }
+
+    if (!state.messages) return this;
+    state.messages.forEach(({
+      fields,
+      content,
+      properties
+    }) => {
+      if (properties.persistent === false) return;
+      const msg = (0, _Message.Message)({ ...fields,
+        redelivered: true
+      }, content, properties, this[prv].onMessageConsumed);
+      this.messages.push(msg);
+    });
+    this[prv].pendingMessageCount = this.messages.length;
+    consumers.forEach(c => c.recover());
+
+    if (continueConsume) {
+      this._consumeNext();
+    }
+
+    return this;
+  }
+
+  delete({
+    ifUnused,
+    ifEmpty
+  } = {}) {
+    const consumers = this[prv].consumers;
+    if (ifUnused && consumers.length) return;
+    if (ifEmpty && this.messages.length) return;
+    const messageCount = this.messages.length;
+    this.stop();
+    const deleteConsumers = consumers.splice(0);
+    deleteConsumers.forEach(consumer => {
+      consumer.cancel();
+    });
+    this.messages.splice(0);
+
+    this._emit('delete', this);
+
+    return {
+      messageCount
+    };
+  }
+
+  close() {
+    this[prv].consumers.splice(0).forEach(consumer => consumer.cancel());
+    this[prv].exclusivelyConsumed = false;
+  }
+
+  stop() {
+    this[prv].stopped = true;
+    this.consumers.forEach(consumer => consumer.stop());
+  }
+
+  getCapacity() {
+    return this.options.maxLength - this.messages.length;
   }
 
 }
