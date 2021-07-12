@@ -49,7 +49,7 @@ describe('Queue', () => {
         'reject',
         'stop',
         'unbindConsumer',
-        // XXX we might need to use defineProperty on each object for this unless we find a better solution
+        // XXX non enumerable getter
         // 'messageCount',
       ];
       const queue = Queue();
