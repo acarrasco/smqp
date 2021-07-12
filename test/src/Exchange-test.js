@@ -33,7 +33,7 @@ describe('Exchange', () => {
         'name',
         'type',
         'options',
-        // XXX these are non enumerable getters
+        // XXX non enumerable getters
         // 'bindingCount',
         // 'bindings',
         // 'stopped',

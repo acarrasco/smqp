@@ -13,7 +13,7 @@ describe('Broker', () => {
     it('should export only enumerable properties', () => {
       const enumerableProperties = [
         'owner',
-        // getters are not enumerable
+        // XXX non enumerable getters
         // 'exchangeCount',
         // 'queueCount',
         // 'consumerCount',
